@@ -38,6 +38,16 @@ type TemplateState = {
   name: string
 }
 
+type ScoreData = {
+  overall_score: number
+  keyword_match: number
+  formatting_score: number
+  impact_score: number
+  length_score: number
+  improvements: string[]
+  strengths: string[]
+}
+
 const markdownComponents: Components = {
   h1: ({ children }) => (
     <h1 style={{ fontSize: '22px', fontWeight: 700, color: '#111827', marginTop: 0, marginBottom: '6px' }}>
@@ -116,6 +126,7 @@ function Field({
   rows = 3,
   required = true,
   optional = false,
+  showCount = false,
 }: {
   label: string
   name: string
@@ -126,6 +137,7 @@ function Field({
   rows?: number
   required?: boolean
   optional?: boolean
+  showCount?: boolean
 }) {
   const cls = optional ? inputDimmed : inputNormal
   return (
@@ -135,6 +147,11 @@ function Field({
         {optional && (
           <span className="normal-case font-normal text-gray-400 tracking-normal">
             — auto-extracted
+          </span>
+        )}
+        {showCount && textarea && value.length > 0 && (
+          <span className="ml-auto normal-case font-normal text-gray-400 tracking-normal">
+            {value.length} chars
           </span>
         )}
       </label>
@@ -168,17 +185,23 @@ function DownloadButton({
   loading,
   disabled,
   onClick,
+  variant = 'blue',
 }: {
   label: string
   loading: boolean
   disabled: boolean
   onClick: () => void
+  variant?: 'blue' | 'green'
 }) {
+  const colors =
+    variant === 'green'
+      ? 'bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400'
+      : 'bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400'
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      className="inline-flex items-center gap-1.5 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 rounded-lg px-3.5 py-2 transition-colors shadow-sm"
+      className={`inline-flex items-center gap-1.5 text-sm font-semibold text-white ${colors} rounded-lg px-3.5 py-2 transition-colors shadow-sm`}
     >
       {loading ? (
         <>
@@ -251,6 +274,81 @@ function markdownToHtml(md: string): string {
   return out.join('\n')
 }
 
+function cleanResponse(text: string): string {
+  return text
+    .replace(/```[\w]*\n?/g, '')
+    .replace(/```/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function stripMarkdown(md: string): string {
+  return md
+    .replace(/#{1,6} /g, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/^[-*] /gm, '• ')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^-{3,}$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function extractNameFromResume(resumeText: string): string {
+  const match = resumeText.match(/^#\s+(.+)$/m)
+  if (!match) return ''
+  return match[1].trim().replace(/\s+/g, '_')
+}
+
+function scoreColor(v: number) {
+  return v >= 75 ? '#16a34a' : v >= 51 ? '#d97706' : '#dc2626'
+}
+
+function CircularScore({ value }: { value: number }) {
+  const r = 52
+  const circ = 2 * Math.PI * r
+  const offset = circ - (value / 100) * circ
+  const color = scoreColor(value)
+  return (
+    <div className="relative flex items-center justify-center" style={{ width: 136, height: 136 }}>
+      <svg width="136" height="136" style={{ transform: 'rotate(-90deg)' }}>
+        <circle cx="68" cy="68" r={r} fill="none" stroke="#f3f4f6" strokeWidth="10" />
+        <circle
+          cx="68" cy="68" r={r} fill="none"
+          stroke={color} strokeWidth="10"
+          strokeDasharray={circ}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          style={{ transition: 'stroke-dashoffset 1.2s ease-in-out' }}
+        />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-4xl font-bold leading-none" style={{ color }}>{value}</span>
+        <span className="text-xs text-gray-400 font-medium mt-0.5">/ 100</span>
+      </div>
+    </div>
+  )
+}
+
+function ScoreBar({ label, value }: { label: string; value: number }) {
+  const color = scoreColor(value)
+  return (
+    <div>
+      <div className="flex justify-between items-center mb-1.5">
+        <span className="text-xs font-medium text-gray-600">{label}</span>
+        <span className="text-xs font-bold tabular-nums" style={{ color }}>{value}</span>
+      </div>
+      <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full"
+          style={{ width: `${value}%`, backgroundColor: color, transition: 'width 1.2s ease-out' }}
+        />
+      </div>
+    </div>
+  )
+}
+
 // ───────────────────────────────────────────────────────────────────────────────
 
 export default function ResumeForm() {
@@ -258,12 +356,15 @@ export default function ResumeForm() {
   const [template, setTemplate] = useState<TemplateState>({ file: null, name: '' })
   const [result, setResult] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const [downloading, setDownloading] = useState<'resume' | 'cover_letter' | null>(null)
+  const [downloading, setDownloading] = useState<'resume' | 'cover_letter' | 'docx' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [copiedPlain, setCopiedPlain] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [refinement, setRefinement] = useState('')
   const [refining, setRefining] = useState(false)
+  const [score, setScore] = useState<ScoreData | null>(null)
+  const [scoring, setScoring] = useState(false)
   const resultRef = useRef<HTMLDivElement>(null)
   const refineRef = useRef<HTMLInputElement>(null)
 
@@ -330,11 +431,29 @@ export default function ResumeForm() {
 
   const clearTemplate = () => setTemplate({ file: null, name: '' })
 
+  const fetchScore = async (resumeText: string, jobDescription: string) => {
+    setScoring(true)
+    try {
+      const fd = new FormData()
+      fd.append('resume_text', resumeText)
+      fd.append('job_description', jobDescription)
+      const res = await fetch('http://127.0.0.1:8000/score-resume', { method: 'POST', body: fd })
+      if (!res.ok) return
+      const data = await res.json()
+      setScore(data)
+    } catch {
+      // scoring is non-critical, swallow errors silently
+    } finally {
+      setScoring(false)
+    }
+  }
+
   const handleSubmit = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault()
     setLoading(true)
     setError(null)
     setResult(null)
+    setScore(null)
 
     try {
       const formData = new FormData()
@@ -352,7 +471,9 @@ export default function ResumeForm() {
       }
 
       const data = await res.json()
-      setResult(data.resume)
+      const cleaned = cleanResponse(data.resume)
+      setResult(cleaned)
+      fetchScore(cleaned, form.job_description)
 
       setTimeout(() => {
         resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -380,7 +501,7 @@ export default function ResumeForm() {
         throw new Error(body.detail || `Server error ${res.status}`)
       }
       const data = await res.json()
-      setResult(data.resume)
+      setResult(cleanResponse(data.resume))
       setRefinement('')
       refineRef.current?.focus()
     } catch (err) {
@@ -408,6 +529,13 @@ export default function ResumeForm() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const copyPlainText = async () => {
+    if (!result) return
+    await navigator.clipboard.writeText(stripMarkdown(result))
+    setCopiedPlain(true)
+    setTimeout(() => setCopiedPlain(false), 2000)
+  }
+
   const downloadSection = async (section: 'resume' | 'cover_letter') => {
     if (!result) return
     setDownloading(section)
@@ -433,16 +561,53 @@ export default function ResumeForm() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
+      const nameSlug = extractNameFromResume(sections.resume) || form.name.replace(/\s+/g, '_') || 'Resume'
       a.download =
         section === 'resume'
-          ? `${form.name || 'Resume'}_Resume.pdf`
-          : `${form.name || 'Resume'}_Cover_Letter.pdf`
+          ? `${nameSlug}_Resume.pdf`
+          : `${nameSlug}_Cover_Letter.pdf`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'PDF download failed.')
+    } finally {
+      setDownloading(null)
+    }
+  }
+
+  const downloadDocx = async () => {
+    if (!sections.resume) return
+    setDownloading('docx')
+    setError(null)
+    try {
+      const formData = new FormData()
+      formData.append('text', sections.resume)
+      formData.append('name', form.name || extractNameFromResume(sections.resume).replace(/_/g, ' ') || 'Candidate')
+
+      const res = await fetch('http://127.0.0.1:8000/download-docx', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail || `Server error ${res.status}`)
+      }
+
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const nameSlug = extractNameFromResume(sections.resume) || form.name.replace(/\s+/g, '_') || 'Resume'
+      a.download = `${nameSlug}_Resume.docx`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'DOCX download failed.')
     } finally {
       setDownloading(null)
     }
@@ -608,6 +773,7 @@ export default function ResumeForm() {
                   textarea
                   rows={3}
                   placeholder="Paste the job posting here..."
+                  showCount
                 />
               </div>
             </div>
@@ -753,6 +919,43 @@ export default function ResumeForm() {
           </form>
         </div>
 
+        {/* Loading skeleton */}
+        {loading && (
+          <div className="mt-8 space-y-6 animate-pulse">
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+              <div className="h-5 bg-gray-200 rounded w-24 mb-6" />
+              <div className="h-8 bg-gray-300 rounded w-48 mb-2" />
+              <div className="h-4 bg-gray-200 rounded w-72 mb-8" />
+              <div className="h-3 bg-gray-200 rounded w-32 mb-3" />
+              <div className="space-y-2 mb-6">
+                <div className="h-3 bg-gray-100 rounded w-full" />
+                <div className="h-3 bg-gray-100 rounded w-5/6" />
+                <div className="h-3 bg-gray-100 rounded w-4/6" />
+              </div>
+              <div className="h-3 bg-gray-200 rounded w-40 mb-3" />
+              <div className="space-y-2 mb-6">
+                <div className="h-3 bg-gray-100 rounded w-full" />
+                <div className="h-3 bg-gray-100 rounded w-3/4" />
+              </div>
+              <div className="h-3 bg-gray-200 rounded w-48 mb-3" />
+              <div className="space-y-1.5">
+                <div className="h-3 bg-gray-100 rounded w-full" />
+                <div className="h-3 bg-gray-100 rounded w-11/12" />
+                <div className="h-3 bg-gray-100 rounded w-4/5" />
+                <div className="h-3 bg-gray-100 rounded w-5/6" />
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+              <div className="h-5 bg-gray-200 rounded w-28 mb-5" />
+              <div className="space-y-2">
+                <div className="h-3 bg-gray-100 rounded w-full" />
+                <div className="h-3 bg-gray-100 rounded w-11/12" />
+                <div className="h-3 bg-gray-100 rounded w-4/5" />
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Result */}
         {result && (
           <div ref={resultRef} className="mt-8 space-y-6">
@@ -762,6 +965,16 @@ export default function ResumeForm() {
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-base font-semibold text-gray-900">Resume</h3>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={copyPlainText}
+                    className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 bg-white border border-gray-200 hover:border-gray-300 rounded-lg px-3.5 py-2 transition-colors"
+                  >
+                    {copiedPlain ? (
+                      <span className="text-green-600">Copied!</span>
+                    ) : (
+                      'Copy plain text'
+                    )}
+                  </button>
                   <button
                     onClick={copyToClipboard}
                     className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 bg-white border border-gray-200 hover:border-gray-300 rounded-lg px-3.5 py-2 transition-colors"
@@ -778,7 +991,7 @@ export default function ResumeForm() {
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                         </svg>
-                        Copy All
+                        Copy formatted
                       </>
                     )}
                   </button>
@@ -788,6 +1001,13 @@ export default function ResumeForm() {
                     disabled={downloading !== null}
                     onClick={() => downloadSection('resume')}
                   />
+                  <DownloadButton
+                    label="Download Word"
+                    loading={downloading === 'docx'}
+                    disabled={downloading !== null}
+                    onClick={downloadDocx}
+                    variant="green"
+                  />
                 </div>
               </div>
               <div className="bg-white rounded-2xl shadow-sm border border-gray-100 px-10 py-8">
@@ -796,6 +1016,112 @@ export default function ResumeForm() {
                 </ReactMarkdown>
               </div>
             </div>
+
+            {/* ATS Score card */}
+            {(scoring || score) && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                <div className="flex items-center justify-between mb-5">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-900">ATS Score</h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {form.job_description.trim() ? 'Scored against the job description' : 'Scored against ATS best practices'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => fetchScore(sections.resume, form.job_description)}
+                    disabled={scoring}
+                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 rounded-lg px-3 py-1.5 transition-colors"
+                  >
+                    {scoring ? (
+                      <>
+                        <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                        </svg>
+                        Scoring…
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        Re-score
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {scoring && !score && (
+                  <div className="flex items-center gap-3 animate-pulse">
+                    <div className="w-[136px] h-[136px] rounded-full bg-gray-100 flex-shrink-0" />
+                    <div className="flex-1 space-y-4">
+                      {['Keyword Match', 'Formatting', 'Impact', 'Length'].map((l) => (
+                        <div key={l}>
+                          <div className="flex justify-between mb-1.5">
+                            <div className="h-3 bg-gray-200 rounded w-24" />
+                            <div className="h-3 bg-gray-200 rounded w-6" />
+                          </div>
+                          <div className="h-2 bg-gray-100 rounded-full" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {score && (
+                  <div className="flex flex-col sm:flex-row gap-6">
+                    {/* Left: circular score */}
+                    <div className="flex flex-col items-center gap-2 flex-shrink-0">
+                      <CircularScore value={score.overall_score} />
+                      <span className="text-xs font-medium text-gray-500">Overall</span>
+                    </div>
+
+                    {/* Right: sub-scores + tips */}
+                    <div className="flex-1 space-y-5">
+                      <div className="space-y-3">
+                        <ScoreBar label="Keyword Match" value={score.keyword_match} />
+                        <ScoreBar label="Formatting" value={score.formatting_score} />
+                        <ScoreBar label="Impact" value={score.impact_score} />
+                        <ScoreBar label="Length" value={score.length_score} />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+                        {score.improvements.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide mb-2">To improve</p>
+                            <ul className="space-y-1.5">
+                              {score.improvements.map((tip, i) => (
+                                <li key={i} className="flex items-start gap-1.5 text-xs text-gray-700">
+                                  <svg className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                                  </svg>
+                                  {tip}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {score.strengths.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-green-700 uppercase tracking-wide mb-2">Strengths</p>
+                            <ul className="space-y-1.5">
+                              {score.strengths.map((s, i) => (
+                                <li key={i} className="flex items-start gap-1.5 text-xs text-gray-700">
+                                  <svg className="w-3.5 h-3.5 text-green-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                  </svg>
+                                  {s}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Cover letter section */}
             {sections.coverLetter && (
